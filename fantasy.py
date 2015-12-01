@@ -6,7 +6,7 @@ import random
 import numpy as np
 import matplotlib.pyplot as plt
 from pymc import *
-from scipy.stats import poisson
+from scipy import stats
 
 def read_data():
     data = []
@@ -32,32 +32,34 @@ def get_num_rounds(data):
     return last_round
 
 
-def player_scores_by_week(data):
-    scores = dict()
+def player_scores_by_week(data, num_rounds, players):
+    scores = {p:[0]*(num_rounds+1) for p in players}
     for row in data:
-        scores[(int(row['week']), row['player_1'])] = float(row['player_1_score'])
-        scores[(int(row['week']), row['player_2'])] = float(row['player_2_score'])
+        scores[row['player_1']][int(row['week'])] = float(row['player_1_score'])
+        scores[row['player_2']][int(row['week'])] = float(row['player_2_score'])
     return scores
 
 
 def generate_round_robin_schedule(num_players, num_rounds):
-    round_robin_schedule = [[None]*num_rounds for _ in range(num_players)]
+    round_robin_schedule = [[None]*(num_players-1) for _ in range(num_players)]
     for p in range(num_players):
-        for r in range(num_rounds):
+        for r in range(num_players-1):
             round_robin_schedule[p][r] = ((num_players - p - 1) - r) % num_players
-    return round_robin_schedule
+    round_robin_schedule = np.array(round_robin_schedule)
+    schedule = np.concatenate((round_robin_schedule, round_robin_schedule[:,:(num_rounds-(num_players-1))]), axis=1)
+    return schedule
 
 
-def get_standings(scores, schedule, ids_to_players):
+def get_standings(scores, schedule, players):
     player_win_loss = defaultdict(lambda: [0, 0])
     for pid in range(len(schedule)):
         # weeks range from 1-n
         for week in range(1, len(schedule[pid])+1):
             opid = schedule[pid][week-1]
-            player = ids_to_players[pid]
-            opponent = ids_to_players[opid]
-            player_score = scores[(week, player)]
-            opponent_score = scores[(week, opponent)]
+            player = players[pid]
+            opponent = players[opid]
+            player_score = scores[player][week]
+            opponent_score = scores[opponent][week]
             if player_score > opponent_score:
                 player_win_loss[player][0] += 1
             else:
@@ -71,21 +73,25 @@ def generate_model(wins):
     return locals()
 
 
-def generate_models(players, scores, num_rounds, schedule, num_schedules_to_simulate):
-    samples = defaultdict(list)
-
-    for i in range(num_schedules_to_simulate):
-        random.shuffle(players)
-        ids_to_players = dict(enumerate(players))
-        standings = get_standings(scores, schedule, ids_to_players)
+def simulate_games(players, scores, schedule, num_schedules_to_simulate):
+    simulations = defaultdict(list)
+    i = 0
+    for players_permuted in itertools.permutations(players):
+        i += 1
+        standings = get_standings(scores, schedule, players_permuted)
         for player in standings:
             wins, losses = standings[player]
-            samples[player].append(wins)
+            simulations[player].append(wins)
         if i % 10000 == 0:
             print "simulated {}".format(i)
+        if i >= num_schedules_to_simulate:
+            break
+    return simulations
 
+
+def generate_models(simulations):
     player_models = dict()
-    for player, wins in samples.iteritems():
+    for player, wins in simulations.iteritems():
         wins = map(float, wins)
         model = MCMC(generate_model(wins))
         player_models[player] = model
@@ -115,16 +121,17 @@ markers = itertools.cycle([
 ])
 
 
-if __name__ == '__main__':
+def fantasy_models():
     data = read_data()
     players = read_players(data)
-    scores = player_scores_by_week(data)
-    num_schedules_to_simulate = 100000
+    num_rounds = get_num_rounds(data)
+    scores = player_scores_by_week(data, num_rounds, players)
+    num_schedules_to_simulate = 10000000
     num_samples_for_modeling = 1500 #2000
 
-    num_rounds = get_num_rounds(data)
     schedule = generate_round_robin_schedule(len(players), num_rounds)
-    player_models = generate_models(players, scores, num_rounds, schedule, num_schedules_to_simulate)
+    simulations = simulate_games(players, scores, schedule, num_schedules_to_simulate)
+    player_models = generate_models(simulations)
 
     for player, model in player_models.iteritems():
         model.sample(iter=num_samples_for_modeling)
@@ -139,7 +146,38 @@ if __name__ == '__main__':
     for player, model in player_models.iteritems():
         stats = model.stats()
         x = np.array(range(num_rounds+1))
-        plt.plot(x, poisson.pmf(x, stats['lambda_']['mean']), '-' + markers.next(), label=player)
+        plt.plot(x, stats.poisson.pmf(x, stats['lambda_']['mean']), '-' + markers.next(), label=player)
     ax.legend()
     plt.show()
-    #stats = model.stats()
+
+
+def fantasy_simulations():
+    data = read_data()
+    players = read_players(data)
+    num_rounds = get_num_rounds(data)
+    scores = player_scores_by_week(data, num_rounds, players)
+    num_schedules_to_simulate = 10000000
+
+    schedule = generate_round_robin_schedule(len(players), num_rounds)
+    simulations = simulate_games(players, scores, schedule, num_schedules_to_simulate)
+
+    fig = plt.figure()
+
+    ax = fig.add_subplot(1,1,1)
+    ax.set_title("Through Week {}".format(num_rounds))
+    ax.set_xlabel('Number of Wins')
+    ax.set_ylabel('Probability of Number of Wins')
+    ax.set_xlim(0, num_rounds)
+    for player, wins in simulations.iteritems():
+        x = np.array(range(num_rounds+1))
+        y = [0]*(num_rounds+1)
+        for w in wins:
+            y[w] += 1
+        print player, y
+        y = np.array(y)/float(len(wins))
+        plt.plot(x, y, '-' + markers.next(), label=player)
+    ax.legend()
+    plt.show()
+
+if __name__ == '__main__':
+    fantasy_simulations()
